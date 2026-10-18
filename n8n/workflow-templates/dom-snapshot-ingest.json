@@ -1,0 +1,74 @@
+{
+  "id": "DomSnapIngest001",
+  "name": "DOM Snapshot Ingest",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dom-snapshot",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "5d0b8e1a-6f2c-4a3b-9c1d-000000000001",
+      "name": "DOM Snapshot Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "8e3f2a71-4b5c-4d6e-9f70-1a2b3c4d5e6f"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT url, tree, id_map, next_id\nFROM tmp_tab_state\nWHERE tab_id = $1",
+        "options": {
+          "queryReplacement": "={{ [ String($json.body.tabId) ] }}"
+        }
+      },
+      "id": "5d0b8e1a-6f2c-4a3b-9c1d-000000000002",
+      "name": "Load Tab State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [240, 0],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/ingest-snapshot.js}}"
+      },
+      "id": "5d0b8e1a-6f2c-4a3b-9c1d-000000000003",
+      "name": "Diff And Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- $1 tab_id, $2 url, $3 tree, $4 id_map, $5 next_id, $6 website, $7 title, $8 events\nWITH state AS (\n  INSERT INTO tmp_tab_state (tab_id, url, tree, id_map, next_id, updated_at)\n  VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::int, now())\n  ON CONFLICT (tab_id) DO UPDATE\n    SET url = EXCLUDED.url, tree = EXCLUDED.tree, id_map = EXCLUDED.id_map,\n        next_id = EXCLUDED.next_id, updated_at = now()\n  RETURNING tab_id\n),\nevs AS (\n  SELECT * FROM jsonb_to_recordset($8::jsonb) AS e(\"at\" timestamptz, \"kind\" text, \"text\" text)\n),\nexisting AS (\n  SELECT activity_id FROM tmp_activities\n  WHERE tab_id = $1 AND website = $6 AND status = 'open'\n    AND last_event_at > now() - interval '5 minutes'\n    AND started_at > now() - interval '60 minutes'\n  ORDER BY last_event_at DESC\n  LIMIT 1\n),\ncreated AS (\n  INSERT INTO tmp_activities (activity_id, tab_id, website, page_title)\n  SELECT gen_random_uuid()::text, $1, $6, $7\n  WHERE NOT EXISTS (SELECT 1 FROM existing) AND EXISTS (SELECT 1 FROM evs)\n  RETURNING activity_id\n),\ntarget AS (\n  SELECT activity_id FROM existing WHERE EXISTS (SELECT 1 FROM evs)\n  UNION ALL\n  SELECT activity_id FROM created\n),\ntouched AS (\n  UPDATE tmp_activities SET last_event_at = now(), page_title = $7\n  WHERE activity_id IN (SELECT activity_id FROM existing) AND EXISTS (SELECT 1 FROM evs)\n  RETURNING activity_id\n),\ninserted AS (\n  INSERT INTO tmp_activity_events (activity_id, at, kind, text)\n  SELECT t.activity_id, e.at, e.kind, e.text FROM target t CROSS JOIN evs e\n  RETURNING id\n)\nSELECT (SELECT activity_id FROM target LIMIT 1) AS activity_id,\n       (SELECT count(*) FROM inserted) AS events_inserted",
+        "options": {
+          "queryReplacement": "={{ [ $json.tabId, $json.url, $json.tree, $json.idMap, $json.nextId, $json.website, $json.title, $json.events ] }}"
+        }
+      },
+      "id": "5d0b8e1a-6f2c-4a3b-9c1d-000000000004",
+      "name": "Save State And Events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [720, 0]
+    }
+  ],
+  "connections": {
+    "DOM Snapshot Webhook": {
+      "main": [[{ "node": "Load Tab State", "type": "main", "index": 0 }]]
+    },
+    "Load Tab State": {
+      "main": [[{ "node": "Diff And Events", "type": "main", "index": 0 }]]
+    },
+    "Diff And Events": {
+      "main": [[{ "node": "Save State And Events", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

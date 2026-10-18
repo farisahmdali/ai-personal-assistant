@@ -1,0 +1,137 @@
+{
+  "id": "MemoryBuilder001",
+  "name": "Memory Builder",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 10 }]
+        }
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000001",
+      "name": "Every 10 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7a1c3e5f-2b4d-4e6f-8a0b-0000000000a1",
+              "name": "model",
+              "value": "qwen/qwen3.8-27b",
+              "type": "string"
+            },
+            {
+              "id": "7a1c3e5f-2b4d-4e6f-8a0b-0000000000a2",
+              "name": "timezone",
+              "value": "Asia/Kolkata",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Claims activities that are finished: idle for 5 min, or running for 60 min.\nWITH stale_tabs AS (\n  DELETE FROM tmp_tab_state WHERE updated_at < now() - interval '2 hours'\n  RETURNING tab_id\n),\nrecovered AS (\n  UPDATE tmp_activities SET status = 'open'\n  WHERE status = 'processing' AND claimed_at < now() - interval '30 minutes'\n  RETURNING activity_id\n),\nclaimed AS (\n  UPDATE tmp_activities\n  SET status = 'processing', attempts = attempts + 1, claimed_at = now()\n  WHERE status = 'open'\n    AND (last_event_at < now() - interval '5 minutes'\n         OR started_at < now() - interval '60 minutes')\n  RETURNING *\n)\nSELECT c.activity_id, c.tab_id, c.website, c.page_title,\n       c.started_at, c.last_event_at, c.attempts,\n       COALESCE((\n         SELECT jsonb_agg(jsonb_build_object('at', e.at, 'kind', e.kind, 'text', e.text) ORDER BY e.at, e.id)\n         FROM tmp_activity_events e\n         WHERE e.activity_id = c.activity_id\n       ), '[]'::jsonb) AS events\nFROM claimed c\nORDER BY c.started_at",
+        "options": {}
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000003",
+      "name": "Claim Finished Activities",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/build-activity.js}}"
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000004",
+      "name": "Build Activity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000005",
+      "name": "Ask AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/parse-memory.js}}"
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000006",
+      "name": "Parse Memory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- $1 activity_id, $2 action (store | discard | retry | drop), $3..$12 memory fields\nWITH stored AS (\n  INSERT INTO memories (activity_start, activity_end, website, page_title, memory_type,\n                        summary, details, entities, pending_task, importance)\n  SELECT $3::timestamptz, $4::timestamptz, $5, NULLIF($6, ''), $7,\n         $8, $9::jsonb, $10::jsonb, NULLIF($11, ''), $12::real\n  WHERE $2 = 'store'\n  RETURNING id\n),\nfinished AS (\n  -- Deleting the activity also deletes its events (ON DELETE CASCADE).\n  DELETE FROM tmp_activities\n  WHERE activity_id = $1 AND $2 IN ('store', 'discard', 'drop')\n  RETURNING activity_id\n),\nretried AS (\n  UPDATE tmp_activities SET status = 'open'\n  WHERE activity_id = $1 AND $2 = 'retry'\n  RETURNING activity_id\n)\nSELECT $1 AS activity_id, $2 AS action, (SELECT id FROM stored) AS memory_id",
+        "options": {
+          "queryReplacement": "={{ [ $json.activityId, $json.action, $json.startedAt, $json.endedAt, $json.website, $json.pageTitle, $json.memoryType, $json.summary, $json.details, $json.entities, $json.pendingTask, $json.importance ] }}"
+        }
+      },
+      "id": "7a1c3e5f-2b4d-4e6f-8a0b-000000000007",
+      "name": "Save Memory And Clean Up",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 0]
+    }
+  ],
+  "connections": {
+    "Every 10 Minutes": {
+      "main": [[{ "node": "Config", "type": "main", "index": 0 }]]
+    },
+    "Config": {
+      "main": [[{ "node": "Claim Finished Activities", "type": "main", "index": 0 }]]
+    },
+    "Claim Finished Activities": {
+      "main": [[{ "node": "Build Activity", "type": "main", "index": 0 }]]
+    },
+    "Build Activity": {
+      "main": [[{ "node": "Ask AI", "type": "main", "index": 0 }]]
+    },
+    "Ask AI": {
+      "main": [[{ "node": "Parse Memory", "type": "main", "index": 0 }]]
+    },
+    "Parse Memory": {
+      "main": [[{ "node": "Save Memory And Clean Up", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "id": "ActivityIngest01",
+  "name": "Activity Ingest",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "activity",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "6f1c2a0e-1b2d-4c3e-9f4a-0a1b2c3d4e01",
+      "name": "Activity Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "b7e4d9a2-5c61-4f0e-8a3b-2d9c7e1f6a10"
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/normalize-activity.js}}"
+      },
+      "id": "6f1c2a0e-1b2d-4c3e-9f4a-0a1b2c3d4e02",
+      "name": "Normalize Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- $1 rows (JSON array), $2 number of invalid events\n-- Duplicate event ids (retried deliveries) are ignored.\nWITH incoming AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS e(\n    event_id text, ts timestamptz, source text, type text,\n    project_root text, project_name text, data jsonb)\n),\ninserted AS (\n  INSERT INTO activity_events (event_id, ts, source, type, project_root, project_name, data)\n  SELECT event_id, ts, source, type, project_root, project_name, COALESCE(data, '{}'::jsonb)\n  FROM incoming\n  ON CONFLICT (event_id) DO NOTHING\n  RETURNING event_id\n)\nSELECT (SELECT count(*) FROM incoming)::int AS received,\n       (SELECT count(*) FROM inserted)::int AS accepted,\n       $2::int AS invalid",
+        "options": {
+          "queryReplacement": "={{ [ $json.rows, $json.invalid ] }}"
+        }
+      },
+      "id": "6f1c2a0e-1b2d-4c3e-9f4a-0a1b2c3d4e03",
+      "name": "Store Raw Events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [480, 0]
+    }
+  ],
+  "connections": {
+    "Activity Webhook": {
+      "main": [[{ "node": "Normalize Events", "type": "main", "index": 0 }]]
+    },
+    "Normalize Events": {
+      "main": [[{ "node": "Store Raw Events", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

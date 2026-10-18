@@ -1,0 +1,12 @@
+{
+  "name": "n8n-sql-tests",
+  "private": true,
+  "description": "Runs the workflows' SQL against PGlite (Postgres compiled to WebAssembly). Kept separate so n8n's node_modules is not touched.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"*.test.mjs\""
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.0"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "cursor-activity",
+  "displayName": "AI Assistant Activity",
+  "description": "Records coding activity (edits, files, terminal, git) for the local AI personal assistant.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "aiAssistantActivity.pause", "title": "AI Assistant: Pause activity capture" },
+      { "command": "aiAssistantActivity.resume", "title": "AI Assistant: Resume activity capture" },
+      { "command": "aiAssistantActivity.showLog", "title": "AI Assistant: Show activity log" }
+    ]
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "package": "npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license",
+    "install-hooks": "node scripts/install-hooks.mjs",
+    "uninstall-hooks": "node scripts/install-hooks.mjs --remove"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "memory-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simple web page to view the AI assistant's memories",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.0"
+  }
+}

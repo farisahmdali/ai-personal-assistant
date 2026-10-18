@@ -1,0 +1,16 @@
+{
+  "name": "ai-assistant-n8n",
+  "version": "1.0.0",
+  "private": true,
+  "description": "n8n automation layer for the AI personal assistant",
+  "scripts": {
+    "build": "node scripts/build-workflows.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "start": "node --env-file=.env node_modules/n8n/bin/n8n start",
+    "import": "node --env-file=.env node_modules/n8n/bin/n8n import:workflow --separate --input=workflows",
+    "export": "node --env-file=.env node_modules/n8n/bin/n8n export:workflow --all --separate --pretty --output=workflows"
+  },
+  "dependencies": {
+    "n8n": "^2.42.3"
+  }
+}

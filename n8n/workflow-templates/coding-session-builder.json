@@ -1,0 +1,160 @@
+{
+  "id": "CodingSessions01",
+  "name": "Coding Session Builder",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 5 }]
+        }
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "a3c5e7f9-1b2d-4f6a-8c0e-0000000000a1", "name": "model", "value": "qwen/qwen3.8-27b", "type": "string" },
+            { "id": "a3c5e7f9-1b2d-4f6a-8c0e-0000000000a2", "name": "timezone", "value": "Asia/Kolkata", "type": "string" },
+            { "id": "a3c5e7f9-1b2d-4f6a-8c0e-0000000000a3", "name": "idleMinutes", "value": 20, "type": "number" },
+            { "id": "a3c5e7f9-1b2d-4f6a-8c0e-0000000000a4", "name": "interimMinutes", "value": 30, "type": "number" },
+            { "id": "a3c5e7f9-1b2d-4f6a-8c0e-0000000000a5", "name": "rawRetentionDays", "value": 3, "type": "number" },
+            { "id": "a3c5e7f9-1b2d-4f6a-8c0e-0000000000a6", "name": "sendDiffs", "value": true, "type": "boolean" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [200, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Project events not yet in a work session, and the sessions they can join.\nSELECT json_build_object(\n  'events', COALESCE((\n    SELECT json_agg(json_build_object('event_id', event_id, 'project_root', project_root,\n                                      'project_name', project_name, 'ts', ts) ORDER BY ts)\n    FROM (SELECT event_id, project_root, project_name, ts\n          FROM activity_events\n          WHERE session_id IS NULL AND project_root IS NOT NULL\n          ORDER BY ts LIMIT 5000) e\n  ), '[]'::json),\n  'sessions', COALESCE((\n    SELECT json_agg(json_build_object('session_id', session_id, 'project_root', project_root,\n                                      'project_name', project_name, 'started_at', started_at,\n                                      'last_event_at', last_event_at))\n    FROM work_sessions WHERE status IN ('open', 'processing')\n  ), '[]'::json)\n) AS data",
+        "options": {}
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000003",
+      "name": "Load Unassigned Events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [400, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/sessionize-events.js}}"
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000004",
+      "name": "Group Into Sessions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- $1 plan: { sessions: [...], assignments: [{ event_id, session_id }] }\nWITH plan AS (SELECT $1::jsonb AS p),\nupserted AS (\n  INSERT INTO work_sessions (session_id, project_root, project_name, started_at, last_event_at)\n  SELECT s.session_id, s.project_root, s.project_name, s.started_at, s.last_event_at\n  FROM plan, jsonb_to_recordset(plan.p -> 'sessions') AS s(\n    session_id text, project_root text, project_name text,\n    started_at timestamptz, last_event_at timestamptz)\n  ON CONFLICT (session_id) DO UPDATE SET\n    started_at = LEAST(work_sessions.started_at, EXCLUDED.started_at),\n    last_event_at = GREATEST(work_sessions.last_event_at, EXCLUDED.last_event_at),\n    project_name = COALESCE(EXCLUDED.project_name, work_sessions.project_name),\n    status = CASE WHEN work_sessions.status = 'closed' THEN 'open' ELSE work_sessions.status END\n  RETURNING session_id\n),\nassigned AS (\n  UPDATE activity_events e SET session_id = a.session_id\n  FROM plan, jsonb_to_recordset(plan.p -> 'assignments') AS a(event_id text, session_id text)\n  WHERE e.event_id = a.event_id AND e.session_id IS NULL\n  RETURNING e.event_id\n)\nSELECT (SELECT count(*) FROM upserted)::int AS sessions,\n       (SELECT count(*) FROM assigned)::int AS events",
+        "options": {
+          "queryReplacement": "={{ [ $json.plan ] }}"
+        }
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000005",
+      "name": "Apply Sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [800, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- $1 idleMinutes, $2 interimMinutes, $3 rawRetentionDays\n-- Claims sessions to summarise: ended (idle) ones, and long-running ones\n-- whose last summary is older than interimMinutes. Also applies retention.\nWITH cleanup_events AS (\n  DELETE FROM activity_events\n  WHERE (processed_at IS NOT NULL AND processed_at < now() - make_interval(days => $3::int))\n     OR (project_root IS NULL AND ts < now() - make_interval(days => $3::int))\n  RETURNING 1\n),\ncleanup_sessions AS (\n  DELETE FROM work_sessions\n  WHERE status = 'closed' AND last_event_at < now() - interval '7 days'\n  RETURNING 1\n),\nrecovered AS (\n  UPDATE work_sessions SET status = 'open'\n  WHERE status = 'processing' AND claimed_at < now() - interval '30 minutes'\n  RETURNING session_id\n),\nclaimed AS (\n  UPDATE work_sessions w\n  SET status = 'processing', attempts = w.attempts + 1, claimed_at = now(),\n      final = w.last_event_at < now() - make_interval(mins => $1::int)\n  WHERE w.status = 'open'\n    AND EXISTS (SELECT 1 FROM activity_events e\n                WHERE e.session_id = w.session_id AND e.processed_at IS NULL)\n    AND (w.last_event_at < now() - make_interval(mins => $1::int)\n         OR COALESCE(w.last_summarized_at, w.started_at) < now() - make_interval(mins => $2::int))\n  RETURNING w.*\n)\nSELECT c.session_id, c.project_root, c.project_name, c.started_at, c.last_event_at,\n       c.attempts, c.memory_id, c.final,\n  COALESCE((SELECT json_agg(json_build_object('id', e.event_id, 'ts', e.ts, 'source', e.source,\n                                              'type', e.type, 'data', e.data) ORDER BY e.ts)\n            FROM (SELECT * FROM activity_events\n                  WHERE session_id = c.session_id AND processed_at IS NULL\n                  ORDER BY ts LIMIT 3000) e), '[]'::json) AS events,\n  COALESCE((SELECT json_agg(json_build_object('ts', e.ts, 'type', e.type, 'data', e.data) ORDER BY e.ts)\n            FROM activity_events e\n            WHERE e.source = 'monitor'\n              AND e.ts BETWEEN c.started_at - interval '15 minutes' AND c.last_event_at), '[]'::json) AS context,\n  COALESCE((SELECT json_agg(json_build_object('start', m.activity_start, 'website', m.website,\n                                              'summary', m.summary) ORDER BY m.activity_start)\n            FROM memories m\n            WHERE m.website IS NOT NULL\n              AND m.activity_start BETWEEN c.started_at - interval '30 minutes' AND c.last_event_at), '[]'::json) AS research,\n  (SELECT json_build_object('id', m.id, 'title', m.page_title, 'summary', m.summary, 'status', m.status,\n                            'files', m.files, 'progress', m.evidence ->> 'progress',\n                            'blockers', m.evidence -> 'blockers', 'nextSteps', m.evidence -> 'nextSteps')\n   FROM memories m WHERE m.id = c.memory_id) AS current_memory,\n  COALESCE((SELECT json_agg(t) FROM (\n      SELECT m.id, m.page_title AS title, m.summary, m.status\n      FROM memories m\n      WHERE m.memory_type = 'coding_task' AND m.project_root = c.project_root\n        AND m.status IS DISTINCT FROM 'completed'\n        AND m.id IS DISTINCT FROM c.memory_id\n      ORDER BY COALESCE(m.updated_at, m.created_at) DESC\n      LIMIT 5) t), '[]'::json) AS open_tasks\nFROM claimed c\nORDER BY c.started_at",
+        "options": {
+          "queryReplacement": "={{ [ $('Config').first().json.idleMinutes, $('Config').first().json.interimMinutes, $('Config').first().json.rawRetentionDays ] }}"
+        }
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000006",
+      "name": "Claim Sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1000, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/build-coding-evidence.js}}"
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000007",
+      "name": "Build Evidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000008",
+      "name": "Ask AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "{{code:nodes/parse-coding-summary.js}}"
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-000000000009",
+      "name": "Parse Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1600, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- $1 session_id, $2 action (store | discard | retry | drop), $3 final ('true'/'false'),\n-- $4 memory (JSON), $5 processedUntil (events up to here were summarised)\n-- Updates the task's existing memory instead of creating duplicates.\nWITH m AS (SELECT $4::jsonb AS j),\ntarget AS (\n  SELECT memories.id FROM memories, m\n  WHERE $2 = 'store' AND memories.memory_type = 'coding_task'\n    AND memories.project_root = m.j ->> 'projectRoot'\n    AND memories.id = NULLIF(m.j ->> 'targetMemoryId', '')::bigint\n),\nupdated AS (\n  UPDATE memories SET\n    page_title = m.j ->> 'title',\n    task_key = m.j ->> 'taskKey',\n    summary = m.j ->> 'summary',\n    details = m.j -> 'details',\n    entities = m.j -> 'entities',\n    status = m.j ->> 'status',\n    files = (SELECT COALESCE(jsonb_agg(DISTINCT f), '[]'::jsonb) FROM (\n               SELECT jsonb_array_elements_text(COALESCE(memories.files, '[]'::jsonb)) AS f\n               UNION SELECT jsonb_array_elements_text(m.j -> 'files')) x),\n    evidence = m.j -> 'evidence',\n    pending_task = NULLIF(m.j ->> 'pendingTask', ''),\n    confidence = (m.j ->> 'confidence')::real,\n    importance = (m.j ->> 'importance')::real,\n    related_memory_id = COALESCE(NULLIF(m.j ->> 'relatedMemoryId', '')::bigint, memories.related_memory_id),\n    activity_start = LEAST(memories.activity_start, (m.j ->> 'startedAt')::timestamptz),\n    activity_end = GREATEST(memories.activity_end, (m.j ->> 'endedAt')::timestamptz),\n    session_id = m.j ->> 'sessionId',\n    updated_at = now()\n  FROM m\n  WHERE memories.id IN (SELECT id FROM target)\n  RETURNING memories.id\n),\ninserted AS (\n  INSERT INTO memories (activity_start, activity_end, website, page_title, memory_type, summary,\n                        details, entities, pending_task, importance, project, project_root,\n                        task_key, session_id, activity_type, status, files, evidence,\n                        confidence, related_memory_id, updated_at)\n  SELECT (j ->> 'startedAt')::timestamptz, (j ->> 'endedAt')::timestamptz, NULL, j ->> 'title',\n         'coding_task', j ->> 'summary', j -> 'details', j -> 'entities',\n         NULLIF(j ->> 'pendingTask', ''), (j ->> 'importance')::real, j ->> 'projectName',\n         j ->> 'projectRoot', j ->> 'taskKey', j ->> 'sessionId', 'coding', j ->> 'status',\n         j -> 'files', j -> 'evidence', (j ->> 'confidence')::real,\n         NULLIF(j ->> 'relatedMemoryId', '')::bigint, now()\n  FROM m\n  WHERE $2 = 'store' AND NOT EXISTS (SELECT 1 FROM target)\n  RETURNING id\n),\nmemory AS (SELECT id FROM updated UNION ALL SELECT id FROM inserted),\ndone_events AS (\n  UPDATE activity_events SET processed_at = now()\n  WHERE session_id = $1 AND processed_at IS NULL AND ts <= $5::timestamptz\n    AND $2 IN ('store', 'discard', 'drop')\n  RETURNING 1\n),\nsession AS (\n  UPDATE work_sessions SET\n    status = CASE\n      WHEN $2 = 'retry' THEN 'open'\n      WHEN $3 = 'true' AND NOT EXISTS (\n        SELECT 1 FROM activity_events e\n        WHERE e.session_id = $1 AND e.processed_at IS NULL AND e.ts > $5::timestamptz\n      ) THEN 'closed'\n      ELSE 'open' END,\n    memory_id = COALESCE((SELECT id FROM memory LIMIT 1), memory_id),\n    last_summarized_at = CASE WHEN $2 = 'retry' THEN last_summarized_at ELSE now() END,\n    attempts = CASE WHEN $2 = 'retry' THEN attempts ELSE 0 END\n  WHERE session_id = $1\n  RETURNING status\n)\nSELECT $1 AS session_id, $2 AS action, (SELECT id FROM memory LIMIT 1) AS memory_id,\n       (SELECT count(*) FROM done_events)::int AS events_processed,\n       (SELECT status FROM session) AS session_status",
+        "options": {
+          "queryReplacement": "={{ [ $json.sessionId, $json.action, $json.final, $json.memory, $json.processedUntil ] }}"
+        }
+      },
+      "id": "a3c5e7f9-1b2d-4f6a-8c0e-00000000000a",
+      "name": "Save Memory And Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1800, 0]
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Load Unassigned Events", "type": "main", "index": 0 }]] },
+    "Load Unassigned Events": { "main": [[{ "node": "Group Into Sessions", "type": "main", "index": 0 }]] },
+    "Group Into Sessions": { "main": [[{ "node": "Apply Sessions", "type": "main", "index": 0 }]] },
+    "Apply Sessions": { "main": [[{ "node": "Claim Sessions", "type": "main", "index": 0 }]] },
+    "Claim Sessions": { "main": [[{ "node": "Build Evidence", "type": "main", "index": 0 }]] },
+    "Build Evidence": { "main": [[{ "node": "Ask AI", "type": "main", "index": 0 }]] },
+    "Ask AI": { "main": [[{ "node": "Parse Summary", "type": "main", "index": 0 }]] },
+    "Parse Summary": { "main": [[{ "node": "Save Memory And Session", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
